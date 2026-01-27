@@ -75,7 +75,7 @@ public class HybridSearchService {
             // 生成查询向量
             final List<Float> queryVector = embedToVectorList(query);
 
-            // 如果向量生成失败，仅使用文本匹配
+            // 如果向量生成失败，仅使用文本匹配的带权限搜索方法
             if (queryVector == null) {
                 logger.warn("向量生成失败，仅使用文本匹配进行搜索");
                 return textOnlySearchWithPermission(query, userDbId, userEffectiveTags, topK);
@@ -95,8 +95,9 @@ public class HybridSearchService {
                         );
                         // 必须命中关键词 + 权限过滤
                         s.query(q -> q.bool(b -> b
-                                .must(mst -> mst.match(m -> m.field("textContent").query(query)))
-                                .filter(f -> f.bool(bf -> bf
+                                .must(mst -> mst.match(m -> m.field("textContent").query(query)))  //必须满足，参与评分（内容相关性）
+                                .filter(f -> f.bool(bf -> bf  //必须满足，但不参与评分（权限控制）
+                                        //满足下面的条件之一即可
                                         // 条件1: 用户可访问自己的文档
                                         .should(s1 -> s1.term(t -> t.field("userId").value(userDbId)))
                                         // 条件2: 公开文档
@@ -114,19 +115,20 @@ public class HybridSearchService {
                                                 });
                                             }
                                         })
+                                        .minimumShouldMatch("1")  // 必须至少满足一个条件
                                 ))
                         ));
 
-                        // 第二阶段 BM25 rescore
+                        // 第二阶段 BM25 rescore二次打分
                         s.rescore(r -> r
                                 .windowSize(recallK)
                                 .query(rq -> rq
-                                        .queryWeight(0.2d)               // 保留部分 KNN 分
+                                        .queryWeight(0.2d)               // 保留部分 KNN 分（原始_score保留0.2的权重）
                                         .rescoreQueryWeight(1.0d)        // BM25 主导
                                         .query(rqq -> rqq.match(m -> m
                                                 .field("textContent")
                                                 .query(query)
-                                                .operator(Operator.And)
+                                                .operator(Operator.And)        //要求 query 中的所有分词都必须出现在文档中，比普通的match更严格
                                         ))
                                 )
                         );
@@ -143,6 +145,7 @@ public class HybridSearchService {
                         logger.debug("搜索结果 - 文件: {}, 块: {}, 分数: {}, 内容: {}", 
                             hit.source().getFileMd5(), hit.source().getChunkId(), hit.score(), 
                             hit.source().getTextContent().substring(0, Math.min(50, hit.source().getTextContent().length())));
+                        //Hit<EsDocument> 里的数据，转成你的业务 DTO SearchResult
                         return new SearchResult(
                                 hit.source().getFileMd5(),
                                 hit.source().getChunkId(),
@@ -229,11 +232,12 @@ public class HybridSearchService {
                                                             });
                                                         }
                                                     })
+                                                    .minimumShouldMatch("1")  // 必须至少满足一个条件
                                             )
                                     )
                             )
                     )
-                    .minScore(0.3d)
+                    .minScore(0.3d) //丢掉得分 < 0.3 的结果，只取前 topK 条
                     .size(topK),
                     EsDocument.class
             );
