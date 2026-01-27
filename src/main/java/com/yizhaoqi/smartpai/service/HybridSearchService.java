@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import co.elastic.clients.elasticsearch._types.query_dsl.Operator;
+import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 
 import java.util.Collections;
 import java.util.List;
@@ -82,41 +83,48 @@ public class HybridSearchService {
             }
 
             logger.debug("向量生成成功，开始执行混合搜索 KNN");
+            logger.debug("权限过滤条件 - 用户ID: {}, 组织标签: {}", userDbId, userEffectiveTags);
+
+            // 构建权限过滤条件（在 KNN 和 query 中都需要使用）
+            Query permissionFilter = Query.of(q -> q
+                    .bool(bf -> bf
+                            //满足下面的条件之一即可
+                            // 条件1: 用户可访问自己的文档
+                            .should(s1 -> s1.term(t -> t.field("userId").value(userDbId)))
+                            // 条件2: 公开文档
+                            .should(s2 -> s2.term(t -> t.field("isPublic").value(true)))
+                            // 条件3: 组织标签
+                            .should(s3 -> {
+                                if (userEffectiveTags.isEmpty()) {
+                                    return s3.matchNone(mn -> mn);
+                                } else if (userEffectiveTags.size() == 1) {
+                                    return s3.term(t -> t.field("orgTag").value(userEffectiveTags.get(0)));
+                                } else {
+                                    return s3.bool(inner -> {
+                                        userEffectiveTags.forEach(tag -> inner.should(sh2 -> sh2.term(t -> t.field("orgTag").value(tag))));
+                                        return inner;
+                                    });
+                                }
+                            })
+                            .minimumShouldMatch("1")  // 必须至少满足一个条件
+                    )
+            );
 
             SearchResponse<EsDocument> response = esClient.search(s -> {
                         s.index("knowledge_base");
-                        // KNN 召回
+                        // KNN 召回（添加权限过滤）
                         int recallK = topK * 30; // KNN 召回窗口
                         s.knn(kn -> kn
                                 .field("vector")
                                 .queryVector(queryVector)
                                 .k(recallK)
                                 .numCandidates(recallK)
+                                .filter(permissionFilter)  // KNN 查询也需要权限过滤
                         );
                         // 必须命中关键词 + 权限过滤
                         s.query(q -> q.bool(b -> b
                                 .must(mst -> mst.match(m -> m.field("textContent").query(query)))  //必须满足，参与评分（内容相关性）
-                                .filter(f -> f.bool(bf -> bf  //必须满足，但不参与评分（权限控制）
-                                        //满足下面的条件之一即可
-                                        // 条件1: 用户可访问自己的文档
-                                        .should(s1 -> s1.term(t -> t.field("userId").value(userDbId)))
-                                        // 条件2: 公开文档
-                                        .should(s2 -> s2.term(t -> t.field("public").value(true)))
-                                        // 条件3: 组织标签
-                                        .should(s3 -> {
-                                            if (userEffectiveTags.isEmpty()) {
-                                                return s3.matchNone(mn -> mn);
-                                            } else if (userEffectiveTags.size() == 1) {
-                                                return s3.term(t -> t.field("orgTag").value(userEffectiveTags.get(0)));
-                                            } else {
-                                                return s3.bool(inner -> {
-                                                    userEffectiveTags.forEach(tag -> inner.should(sh2 -> sh2.term(t -> t.field("orgTag").value(tag))));
-                                                    return inner;
-                                                });
-                                            }
-                                        })
-                                        .minimumShouldMatch("1")  // 必须至少满足一个条件
-                                ))
+                                .filter(permissionFilter)  //必须满足，但不参与评分（权限控制）
                         ));
 
                         // 第二阶段 BM25 rescore二次打分
@@ -205,7 +213,7 @@ public class HybridSearchService {
                                                     // 条件2: 用户可以访问公开的文档
                                                     .should(s2 -> s2
                                                             .term(t -> t
-                                                                    .field("public")
+                                                                    .field("isPublic")
                                                                     .value(true)
                                                             )
                                                     )
