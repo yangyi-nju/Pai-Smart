@@ -29,16 +29,16 @@ public class ParseService {
     private DocumentVectorRepository documentVectorRepository;
 
     @Value("${file.parsing.chunk-size}")
-    private int chunkSize;
+    private int chunkSize; //子切片的目标大小（字符数），影响每一条 DocumentVector 的文本长度
 
     @Value("${file.parsing.parent-chunk-size:1048576}")
-    private int parentChunkSize;
+    private int parentChunkSize;//父块大小，即在内存中一次性缓冲的文本上限，达到该大小就会触发一次“父块 → 子切片”的处理。默认 1MB (1048576)
     
     @Value("${file.parsing.buffer-size:8192}")
-    private int bufferSize;
+    private int bufferSize;//包裹 InputStream 的 BufferedInputStream 缓冲大小
     
     @Value("${file.parsing.max-memory-threshold:0.8}")
-    private double maxMemoryThreshold;
+    private double maxMemoryThreshold;//允许的最大内存占用比例，比如 0.8 表示超过 80% 就会触发 GC 或抛异常
     
     public ParseService() {
         // 无需初始化，StandardTokenizer是静态方法
